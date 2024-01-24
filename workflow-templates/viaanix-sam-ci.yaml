@@ -1,0 +1,77 @@
+name: Viaanix SAM CI Workflow
+run-name: ${{ github.actor }} is Deploying an AWS SAM Application 🚀
+
+on: push
+#  push:
+#    branches: [ $default-branch ]
+#  pull_request:
+#    branches: [ $default-branch ]
+
+jobs:
+  Deploy:
+    runs-on: self-hosted
+    environment: ${{ github.ref == 'main' && 'PROD' || 'DEV' }}
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
+    env:
+      ENVIRONMENT: ${{ github.ref == 'main' && 'PROD' || 'DEV' }}
+      RUNNER_ACCESS_TOKEN: ${{ secrets.RUNNER_ACCESS_TOKEN }}
+      RUNNER_ACCOUNT_ID: ${{ secrets.RUNNER_ACCOUNT_ID }}
+      OIDC_URL: ${{ vars.OIDC_URL }}
+      OIDC_THUMBPRINT: ${{ secrets.OIDC_THUMBPRINT }}
+      REPO_URL: ${{ github.server_url}}/${{ github.repository }}
+      ORG_URL: ${{ github.server_url}}
+      TAGS: ${{ vars.TAGS }}
+      REGION: ${{ vars.REGION }}
+      APPLICATION_NAME: ${{ vars.APPLICATION_NAME }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Make Deploy Scripts Executable
+        run: chmod +x ./deploy-scripts/*.sh
+
+      - name: Determine Deploy Rules
+        uses: dorny/paths-filter@v2
+        id: RepoChanges
+        with:
+          base: ${{ github.ref }}
+          filters: |
+            CreateDeployRole:
+              - './deploy-scripts/create-deploy-role.sh'
+            CreateS3Bucket:
+              - './deploy-scripts/create-s3-bucket.sh'
+            Deploy:
+              - './template.yaml'
+              - './deploy-scripts/deploy.sh'
+              - './.github/workflows/deploy.yml'
+          list-files: 'json'
+
+      - name: Get Lowercase Application Name
+        id: GetLowercaseApplicationName
+        run: |
+          echo "LOWERCASE_APPLICATION_NAME=$(echo "${{ env.APPLICATION_NAME }}" | sed -e 's|\([A-Z][^A-Z]\)| \1|g' -e 's|\([a-z]\)\([A-Z]\)|\1 \2|g' | sed 's/^ *//g' | tr '[:upper:]' '[:lower:]' | tr " " "-")-$(echo "${{ env.ENVIRONMENT }}" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.RUNNER_ACCOUNT_ID }}:role/GitHubRunnerAssumeRoleForIAM
+          role-session-name: ${{ steps.GetLowercaseApplicationName.outputs.LOWERCASE_APPLICATION_NAME }}-assume-session-via-oidc
+          aws-region: ${{ env.REGION }}
+
+      - name: Update Deploy Role
+        if: steps.RepoChanges.outputs.CreateDeployRole == 'true'
+        run: ./deploy-scripts/deploy.sh -r
+
+      - name: Update SAM Managed S3 Bucket
+        if: steps.RepoChanges.outputs.CreateS3Bucket == 'true'
+        run: ./deploy-scripts/deploy.sh -b
+
+      - name: Deploy
+        if: steps.RepoChanges.outputs.Deploy == 'true' || steps.RepoChanges.outputs.create-deploy-role == 'true' || steps.RepoChanges.outputs.update-s3-bucket == 'true'
+        run: |
+          eval "$(aws sts assume-role --role-arn "arn:aws:iam::${{ env.RUNNER_ACCOUNT_ID }}:role/${{ env.APPLICATION_NAME }}AssumeRole${{ env.ENVIRONMENT }}" --role-session-name ${{ steps.GetLowercaseApplicationName.outputs.LOWERCASE_APPLICATION_NAME }}-assume-session-via-oidc | jq -r '.Credentials | "export AWS_ACCESS_KEY_ID=\(.AccessKeyId)\nexport AWS_SECRET_ACCESS_KEY=\(.SecretAccessKey)\nexport AWS_SESSION_TOKEN=\(.SessionToken)\n"')"
+          ./deploy-scripts/deploy.sh -d

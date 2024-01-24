@@ -1,0 +1,14 @@
+{
+  "name": "Viaanix SAM CI Workflow",
+  "description": "Deploy an AWS SAM Application",
+  "iconName": "the-big-v",
+  "categories": [
+    "YAML",
+    "continuous-integration",
+    "deployment",
+    "automation"
+  ],
+  "filePatterns": [
+    "^template.ya?ml$"
+  ]
+}
