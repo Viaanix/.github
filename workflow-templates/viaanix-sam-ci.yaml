@@ -60,12 +60,8 @@ jobs:
     env:
       # --------------------- Variables Configured at Runtime --------------------- #
       ENVIRONMENT: ${{ github.ref == 'main' && 'PROD' || 'DEV' }}
-      # ------------------- Organization Variables and Secrets ------------------- #
-      EXAMPLE_ORG_SECRET: ${{ secrets.EXAMPLE_ORG_SECRET }}
-      EXAMPLE_ORG_VARIABLE: ${{ vars.EXAMPLE_ORG_VARIABLE }}
       # -------------------- Repository Variables and Secrets -------------------- #
-      EXAMPLE_REPOSITORY_SECRET: ${{ secrets.EXAMPLE_REPOSITORY_SECRET }}
-      EXAMPLE_REPOSITORY_VARIABLE: ${{ vars.EXAMPLE_REPOSITORY_VARIABLE }}
+      APPLICATION_NAME: ${{ vars.APPLICATION_NAME }}
     outputs:
       # ---------- All Outputs from Viaanix Deploy Scripts Setup Env Job ---------- #
       LOWERCASE_APPLICATION_NAME: ${{ steps.SetupEnv.outputs.LOWERCASE_APPLICATION_NAME }}
