@@ -1,80 +1,223 @@
 name: Viaanix SAM CI Workflow
 run-name: ${{ github.actor }} is Deploying an AWS SAM Application 🚀
 
-on: push
-#  push:
+on:
+  push:
+    paths-ignore:
+      - README.md
 #    branches: [ $default-branch ]
 #  pull_request:
 #    branches: [ $default-branch ]
 
 jobs:
-  Deploy:
+  # Get Rules to Build Only Changed Files
+  GetDeployRules:
     runs-on: self-hosted
     environment: ${{ github.ref == 'main' && 'PROD' || 'DEV' }}
     defaults:
       run:
         working-directory: ${{ github.workspace }}
-    env:
-      ENVIRONMENT: ${{ github.ref == 'main' && 'PROD' || 'DEV' }}
-      RUNNER_ACCESS_TOKEN: ${{ secrets.RUNNER_ACCESS_TOKEN }}
-      RUNNER_ACCOUNT_ID: ${{ secrets.RUNNER_ACCOUNT_ID }}
-      OIDC_URL: ${{ vars.OIDC_URL }}
-      OIDC_THUMBPRINT: ${{ secrets.OIDC_THUMBPRINT }}
-      REPO_URL: ${{ github.server_url}}/${{ github.repository }}
-      ORG_URL: ${{ github.server_url}}
-      TAGS: ${{ vars.TAGS }}
-      REGION: ${{ vars.REGION }}
-      APPLICATION_NAME: ${{ vars.APPLICATION_NAME }}
-    permissions:
-      id-token: write
-      contents: read
+
+    # ==================================================================================== #
+    # --------------- Rules for Running Future Jobs Based on Changed Files --------------- #
+    # ==================================================================================== #
+    outputs:
+      NPMExample: ${{ steps.RepoChanges.outputs.NPMExample }}
+      DockerExample: ${{ steps.RepoChanges.outputs.DockerExample }}
+      DeploySAMExample: ${{ steps.RepoChanges.outputs.DeploySAMExample }}
+
     steps:
-      - uses: actions/checkout@v4
+      # Checkout the Current GitHub Repository
+      - name: Checkout Repo
+        uses: actions/checkout@v4
 
-      - name: Make Deploy Scripts Executable
-        run: chmod +x ./deploy-scripts/*.sh
-
+      # Determine the Rules for Running Future Jobs Based on Changed Files
       - name: Determine Deploy Rules
         uses: dorny/paths-filter@v2
         id: RepoChanges
         with:
           base: ${{ github.ref }}
           filters: |
-            CreateDeployRole:
-              - './deploy-scripts/create-deploy-role.sh'
-            CreateS3Bucket:
-              - './deploy-scripts/create-s3-bucket.sh'
-            Deploy:
+            NPMExample:
+              - './src/*'
+              - './package*.json'
+            DockerExample:
+              - './docker-image-config/*'
+            DeploySAMExample:
               - './template.yaml'
-              - './deploy-scripts/deploy.sh'
               - './.github/workflows/deploy.yml'
           list-files: 'json'
 
-      - name: Get Lowercase Application Name
-        id: GetLowercaseApplicationName
-        run: |
-          echo "LOWERCASE_APPLICATION_NAME=$(echo "${{ env.APPLICATION_NAME }}" | sed -e 's|\([A-Z][^A-Z]\)| \1|g' -e 's|\([a-z]\)\([A-Z]\)|\1 \2|g' | sed 's/^ *//g' | tr '[:upper:]' '[:lower:]' | tr " " "-")-$(echo "${{ env.ENVIRONMENT }}" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
+  # Setup Environment Variables for All Future Jobs
+  SetupEnv:
+    runs-on: self-hosted
+    environment: ${{ github.ref == 'main' && 'PROD' || 'DEV' }}
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
+
+    env:
+      # --------------------- Variables Configured at Runtime --------------------- #
+      ENVIRONMENT: ${{ github.ref == 'main' && 'PROD' || 'DEV' }}
+      # ------------------- Organization Variables and Secrets ------------------- #
+      EXAMPLE_ORG_SECRET: ${{ secrets.EXAMPLE_ORG_SECRET }}
+      EXAMPLE_ORG_VARIABLE: ${{ vars.EXAMPLE_ORG_VARIABLE }}
+      # -------------------- Repository Variables and Secrets -------------------- #
+      EXAMPLE_REPOSITORY_SECRET: ${{ secrets.EXAMPLE_REPOSITORY_SECRET }}
+      EXAMPLE_REPOSITORY_VARIABLE: ${{ vars.EXAMPLE_REPOSITORY_VARIABLE }}
+    outputs:
+      # ---------- All Outputs from Viaanix Deploy Scripts Setup Env Job ---------- #
+      LOWERCASE_APPLICATION_NAME: ${{ steps.SetupEnv.outputs.LOWERCASE_APPLICATION_NAME }}
+      SAM_MANAGED_BUCKET: ${{ steps.SetupEnv.outputs.SAM_MANAGED_BUCKET }}
+      RUNNER_ACCOUNT_ID: ${{ steps.FinishEnvSetup.outputs.RUNNER_ACCOUNT_ID }}
+      ORG: ${{ steps.FinishEnvSetup.outputs.ORG }}
+
+    steps:
+      - name: Setup Env
+        id: SetupEnv
+        uses: Viaanix/viaanix-deploy-scripts/setup-env@dev
+        with:
+          application-name: ${{ env.APPLICATION_NAME }}
+          environment: ${{ env.ENVIRONMENT }}
+      - name: Finish Env Setup
+        id: FinishEnvSetup
+        run: |
+          # Gets the `RUNNER_ACCOUNT_ID` by getting the Identity of the GitHub Runner's Default Role
+          echo "RUNNER_ACCOUNT_ID=$(aws sts get-caller-identity | jq ".Account" | tr -d "\"")" >> "$GITHUB_OUTPUT"
+          echo "ORG=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+  # ==================================================================================== #
+  # -------------------------- Example Docker Build Image Job -------------------------- #
+  # ==================================================================================== #
+  # Build Docker Image
+  BuildImage:
+    runs-on: self-hosted
+    environment: ${{ github.ref == 'main' && 'PROD' || 'DEV' }}
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
+
+    needs:
+      - GetDeployRules
+      - SetupEnv
+    env:
+      # --------------- Variables Configured at Runtime --------------- #
+      ENVIRONMENT: ${{ github.ref == 'main' && 'PROD' || 'DEV' }}
+      ORG_URL: ${{ github.server_url }}
+      RUNNER_IMAGE: ghcr.io/${{ needs.SetupEnv.outputs.ORG }}/self-hosted-runner:${{ github.ref_name }}-v${{ vars.IMAGE_VERSION }}
+      # ------------- Organization Variables and Secrets ------------- #
+      CONTAINER_REGISTRY_TOKEN: ${{ secrets.CONTAINER_REGISTRY_TOKEN }}
+      EXAMPLE_BUILD_ARG: ${{ vars.EXAMPLE_BUILD_ARG }}
+      # -------------- Repository Variables and Secrets -------------- #
+      IMAGE_VERSION: ${{ vars.IMAGE_VERSION }}
+      # ---------- Environment Variables from Previous Jobs ---------- #
+      # GetDeployRules
+      DockerExample: ${{ needs.GetDeployRules.outputs.DockerExample }}
+      # SetupEnv
+      ORG: ${{ needs.SetupEnv.outputs.ORG }}
+
+    steps:
+      # Checkout the Current GitHub Repository
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+        # Build the Docker Image
+      - name: Build Docker Image
+        id: BuildDockerImage
+        if: ${{ env.DockerExample == 'true' }}
+        run: |
+          # Change to the Docker Image Configuration Directory if Applicable
+          # cd ${DOCKER_IMAGE_CONFIG_DIRECTORY} || exit 1
+          
+          # Add the Current User to the Docker Group
+          sudo usermod -a -G docker "$(whoami)"
+          
+          # Log into the Container Registry
+          echo "$CONTAINER_REGISTRY_TOKEN" | docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
+          
+          # Build the Docker Image and Push to the GitHub Container Registry
+          docker build --tag "${{ env.RUNNER_IMAGE }}" --build-arg "EXAMPLE_BUILD_ARG=${{ env.EXAMPLE_BUILD_ARG }}" .
+          docker push "${{ env.RUNNER_IMAGE }}"
+
+  # ==================================================================================== #
+  # ------------------------------ Example SAM Deploy Job ------------------------------ #
+  # ==================================================================================== #
+  # Deploy to AWS through SAM
+  DeploySAM:
+    runs-on: self-hosted
+    environment: ${{ github.ref == 'main' && 'PROD' || 'DEV' }}
+
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
+
+    needs:
+      - GetDeployRules
+      - SetupEnv
+      - BuildImage
+    env:
+      # --------------- Variables Configured at Runtime --------------- #
+      ENVIRONMENT: ${{ github.ref == 'main' && 'PROD' || 'DEV' }}
+      ORG_URL: ${{ github.server_url }}/${{ needs.SetupEnv.outputs.ORG }}
+      RUNNER_IMAGE: ghcr.io/${{ needs.SetupEnv.outputs.ORG }}/self-hosted-runner:${{ github.ref_name }}-v${{ vars.RUNNER_VERSION }}
+
+      # ------------- Organization Variables and Secrets ------------- #
+      CONTAINER_REGISTRY_TOKEN: ${{ secrets.CONTAINER_REGISTRY_TOKEN }}
+      OIDC_URL: ${{ vars.OIDC_URL }}
+
+      # -------------- Repository Variables and Secrets -------------- #
+      APPLICATION_NAME: ${{ vars.APPLICATION_NAME }}
+      REGION: ${{ vars.REGION }}
+      TAGS: ${{ vars.TAGS }}
+
+      # ---------- Environment Variables from Previous Jobs ---------- #
+      # GetDeployRules
+      DockerExample: ${{ needs.GetDeployRules.outputs.DockerExample }}
+      DeploySAMExample: ${{ needs.GetDeployRules.outputs.DeploySAMExample }}
+      # SetupEnv
+      RUNNER_ACCOUNT_ID: ${{ needs.SetupEnv.outputs.RUNNER_ACCOUNT_ID }}
+      LOWERCASE_APPLICATION_NAME: ${{ needs.SetupEnv.outputs.LOWERCASE_APPLICATION_NAME }}
+      SAM_MANAGED_BUCKET: ${{ needs.SetupEnv.outputs.SAM_MANAGED_BUCKET }}
+
+    # Permissions for the Runner to Access AWS Services
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      # Checkout the Current GitHub Repository
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      # Configuring AWS Credentials to Assume the Default GitHub Runner Role
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::${{ env.RUNNER_ACCOUNT_ID }}:role/GitHubRunnerAssumeRoleForIAM
-          role-session-name: ${{ steps.GetLowercaseApplicationName.outputs.LOWERCASE_APPLICATION_NAME }}-assume-session-via-oidc
+          role-session-name: ${{ env.LOWERCASE_APPLICATION_NAME }}-assume-session-via-oidc
           aws-region: ${{ env.REGION }}
 
+      # TODO: Figure Out a Way to Run These Only if Rules Have Changed - Run on Only First Job?
+      # Executing Viaanix Deploy Scripts
       - name: Executing Viaanix Deploy Scripts
         uses: Viaanix/viaanix-deploy-scripts@dev
-
-#      - name: Update Deploy Role
-#        if: steps.RepoChanges.outputs.CreateDeployRole == 'true'
-#        run: ./deploy-scripts/deploy.sh -r
-#
-#      - name: Update SAM Managed S3 Bucket
-#        if: steps.RepoChanges.outputs.CreateS3Bucket == 'true'
-#        run: ./deploy-scripts/deploy.sh -b
-#
-#      - name: Deploy
-#        if: steps.RepoChanges.outputs.Deploy == 'true' || steps.RepoChanges.outputs.create-deploy-role == 'true' || steps.RepoChanges.outputs.update-s3-bucket == 'true'
-#        run: |
-#          eval "$(aws sts assume-role --role-arn "arn:aws:iam::${{ env.RUNNER_ACCOUNT_ID }}:role/${{ env.APPLICATION_NAME }}AssumeRole${{ env.ENVIRONMENT }}" --role-session-name ${{ steps.GetLowercaseApplicationName.outputs.LOWERCASE_APPLICATION_NAME }}-assume-session-via-oidc | jq -r '.Credentials | "export AWS_ACCESS_KEY_ID=\(.AccessKeyId)\nexport AWS_SECRET_ACCESS_KEY=\(.SecretAccessKey)\nexport AWS_SESSION_TOKEN=\(.SessionToken)\n"')"
-#          ./deploy-scripts/deploy.sh -d
+        if: ${{ env.Deploy }}
+        with:
+          # Required Parameters for Executing Viaanix Deploy Scripts
+          # TODO: Might not need to pass these? They might be automatically passed to the Docker Container as Environment Variables?
+          tags: ${{ env.TAGS }}
+          region: ${{ env.REGION }}
+          application-name: ${{ env.APPLICATION_NAME }}
+          environment: ${{ env.ENVIRONMENT }}
+          oidc-url: ${{ env.OIDC_URL }}
+          # Custom Parameter Overrides for SAM Deploy
+          custom-parameter-overrides: "OrgURL=${{ env.ORG_URL }}"
+          # Permissions for AWS Services to Add to a Role for the Runner to Assume - Uncomment the Permissions Needed for the SAM Application
+          # ec2: 'true'
+          # eventbridge: 'true'
+          # lambda: 'true'
+          # sqs: 'true'
+          # ssm: 'true'
+          # vpc: 'true'
+          # iot: 'true'
